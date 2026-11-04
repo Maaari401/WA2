@@ -1,7 +1,7 @@
 openapi: 3.1.0
 info:
   title: Ticketing Service API (Group 6)
-  version: 1.0.0
+  version: 1.1.0
   description: >
     Ticketing Service (Rust / Axum + SQLx). Issues one ticket per paid seat (on `OrderPaid`)
     and validates tickets at the gates. Re-scanning a ticket never admits twice.
@@ -13,12 +13,28 @@ security:
   - bearerAuth: []
 
 paths:
+  /tickets:
+    get:
+      operationId: listMyTickets
+      summary: Tickets of the authenticated customer (from the JWT `sub`)
+      parameters:
+        - $ref: "./common.yaml#/components/parameters/Limit"
+        - $ref: "./common.yaml#/components/parameters/Cursor"
+      responses:
+        "200":
+          description: A page of the caller's tickets
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/TicketPage" }
+        "400": { $ref: "./common.yaml#/components/responses/MalformedRequest" }
+        "401": { $ref: "./common.yaml#/components/responses/Unauthorized" }
+
   /tickets/{ticketId}:
     parameters:
       - $ref: "#/components/parameters/TicketId"
     get:
       operationId: getTicket
-      summary: Retrieves ticket data and validation signature (QR code)
+      summary: Retrieves ticket data and validation signature (QR code) – only its owner
       responses:
         "200":
           description: Issued ticket detail
@@ -27,6 +43,7 @@ paths:
               schema: { $ref: "#/components/schemas/Ticket" }
         "400": { $ref: "./common.yaml#/components/responses/MalformedRequest" }
         "401": { $ref: "./common.yaml#/components/responses/Unauthorized" }
+        "403": { $ref: "./common.yaml#/components/responses/Forbidden" }
         "404": { $ref: "./common.yaml#/components/responses/NotFound" }
 
   /tickets/{ticketId}/scan:
@@ -35,7 +52,7 @@ paths:
     post:
       operationId: scanTicket
       summary: Scanning and verification of the ticket at the entrance gates (strictly idempotent)
-      description: Requires the gate-staff role.
+      description: Requires the `gate-staff` role.
       requestBody:
         required: true
         content:
@@ -68,16 +85,31 @@ components:
   schemas:
     Ticket:
       type: object
-      required: [ticketId, orderId, eventId, seat, qrCodePayload]
+      required: [ticketId, orderId, sessionId, seat, status, qrCodePayload]
       properties:
         ticketId: { type: string, format: uuid }
         orderId: { type: string, format: uuid }
-        eventId: { type: integer, format: int64 }
-        seat: { type: string, example: "E14" }
+        sessionId: { type: integer, format: int64, example: 9001 }
+        seat: { $ref: "./common.yaml#/components/schemas/SeatLabel" }
+        status: { type: string, enum: [ISSUED, USED, CANCELLED], example: "ISSUED" }
         qrCodePayload: { type: string, example: "eyJ0aWNrZXRJZCI6ImY0N2FjMTBi..." }
+
+    TicketPage:
+      type: object
+      required: [items, limit]
+      properties:
+        items:
+          type: array
+          items: { $ref: "#/components/schemas/Ticket" }
+        nextCursor:
+          type: [string, "null"]
+        limit:
+          type: integer
+          example: 50
 
     ScanRequest:
       type: object
+      additionalProperties: false
       required: [scannedByGateId, timestamp]
       properties:
         scannedByGateId: { type: string, example: "GATE_NORTH_02" }

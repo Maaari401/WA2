@@ -1,10 +1,19 @@
 openapi: 3.1.0
 info:
   title: Inventory & Orders Service API (Group 6)
-  version: 1.0.0
+  version: 1.1.0
   description: >
-    Inventory & Orders Service (Rust / Axum + SQLx). Owns seat state (FREE -> HELD -> SOLD),
-    10-minute holds and the order lifecycle. Calls Payments synchronously (`POST /payments`, 2s timeout).
+    Inventory & Orders Service (Rust / Axum + SQLx). Owns the seats of every session and their state
+    (FREE -> HELD -> SOLD), 10-minute holds and the order lifecycle.
+
+
+    Seats are generated when a `SessionPublished` message is consumed: for each sector, rows A, B, C… ×
+    numbers 1..seatsPerRow, labelled `<SECTOR>-<ROW><NUMBER>` (e.g. `PLATEA-E14`), all FREE, each with a copy of
+    its tier and price. Until that message has been processed the session is unknown here (404), so
+    the seat map is eventually consistent with the Catalogue.
+
+
+    The order calls Payments synchronously (`POST /payments`, 2s timeout).
 servers:
   - url: http://localhost:8082/api/v1
     description: Inventory & Orders Service (reached by clients through the API Gateway)
@@ -13,12 +22,12 @@ security:
   - bearerAuth: []
 
 paths:
-  /events/{id}/seats:
+  /sessions/{sessionId}/seats:
     parameters:
-      - $ref: "#/components/parameters/EventId"
+      - $ref: "#/components/parameters/SessionId"
     get:
       operationId: getSeatMap
-      summary: Live seat map of an event (status of every seat)
+      summary: Live seat map of a session (status, tier and price of every seat)
       security: []
       parameters:
         - name: If-None-Match
@@ -40,12 +49,18 @@ paths:
         "400": { $ref: "./common.yaml#/components/responses/MalformedRequest" }
         "404": { $ref: "./common.yaml#/components/responses/NotFound" }
 
-  /events/{id}/holds:
+  /sessions/{sessionId}/holds:
     parameters:
-      - $ref: "#/components/parameters/EventId"
+      - $ref: "#/components/parameters/SessionId"
     post:
       operationId: createHold
-      summary: Temporarily reserves a free seat (FREE -> HELD, 10 min TTL)
+      summary: Temporarily reserves a free seat (FREE -> HELD, 10 min TTL) – customer only
+      description: >
+        Implemented as a conditional update (`... WHERE status = 'FREE'`): among concurrent requests for the
+        same seat exactly one succeeds, the others get 409. Also 409 if the sales of the session are not open yet
+        or the session is cancelled.
+      parameters:
+        - $ref: "./common.yaml#/components/parameters/IdempotencyKey"
       requestBody:
         required: true
         content:
@@ -57,12 +72,13 @@ paths:
           headers:
             Location:
               description: URL of the created hold resource
-              schema: { type: string }
+              schema: { type: string, example: "/api/v1/holds/98213" }
           content:
             application/json:
               schema: { $ref: "#/components/schemas/Hold" }
         "400": { $ref: "./common.yaml#/components/responses/MalformedRequest" }
         "401": { $ref: "./common.yaml#/components/responses/Unauthorized" }
+        "403": { $ref: "./common.yaml#/components/responses/Forbidden" }
         "404": { $ref: "./common.yaml#/components/responses/NotFound" }
         "409": { $ref: "./common.yaml#/components/responses/Conflict" }
         "422": { $ref: "./common.yaml#/components/responses/ValidationFailed" }
@@ -72,18 +88,39 @@ paths:
       - $ref: "#/components/parameters/HoldId"
     delete:
       operationId: releaseHold
-      summary: Releases a hold early (HELD -> FREE)
+      summary: Releases a hold early (HELD -> FREE) – only the customer who owns it
       responses:
         "204":
           description: Hold successfully released (idempotent operation)
         "400": { $ref: "./common.yaml#/components/responses/MalformedRequest" }
         "401": { $ref: "./common.yaml#/components/responses/Unauthorized" }
+        "403": { $ref: "./common.yaml#/components/responses/Forbidden" }
         "404": { $ref: "./common.yaml#/components/responses/NotFound" }
 
   /orders:
+    get:
+      operationId: listMyOrders
+      summary: Orders of the authenticated customer (from the JWT `sub`)
+      parameters:
+        - $ref: "./common.yaml#/components/parameters/Limit"
+        - $ref: "./common.yaml#/components/parameters/Cursor"
+      responses:
+        "200":
+          description: A page of the caller's orders, newest first
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/OrderPage" }
+        "400": { $ref: "./common.yaml#/components/responses/MalformedRequest" }
+        "401": { $ref: "./common.yaml#/components/responses/Unauthorized" }
+
     post:
       operationId: createOrder
       summary: Converts an active hold into an order and starts synchronous payment to Payments (2s timeout)
+      description: >
+        The amount is taken from the price copied on the seat when the session was published, never from the client.
+        Retrying with the same `Idempotency-Key` returns the same order and never charges twice.
+      parameters:
+        - $ref: "./common.yaml#/components/parameters/IdempotencyKey"
       requestBody:
         required: true
         content:
@@ -101,6 +138,7 @@ paths:
               schema: { $ref: "#/components/schemas/Order" }
         "400": { $ref: "./common.yaml#/components/responses/MalformedRequest" }
         "401": { $ref: "./common.yaml#/components/responses/Unauthorized" }
+        "403": { $ref: "./common.yaml#/components/responses/Forbidden" }
         "409": { $ref: "./common.yaml#/components/responses/Conflict" }
         "422": { $ref: "./common.yaml#/components/responses/ValidationFailed" }
         "504": { $ref: "./common.yaml#/components/responses/GatewayTimeout" }
@@ -110,7 +148,7 @@ paths:
       - $ref: "#/components/parameters/OrderId"
     get:
       operationId: getOrder
-      summary: Retrieves the current status of the order
+      summary: Retrieves the current status of the order – only its owner
       responses:
         "200":
           description: Order detail
@@ -119,6 +157,7 @@ paths:
               schema: { $ref: "#/components/schemas/Order" }
         "400": { $ref: "./common.yaml#/components/responses/MalformedRequest" }
         "401": { $ref: "./common.yaml#/components/responses/Unauthorized" }
+        "403": { $ref: "./common.yaml#/components/responses/Forbidden" }
         "404": { $ref: "./common.yaml#/components/responses/NotFound" }
 
 components:
@@ -127,11 +166,11 @@ components:
       $ref: "./common.yaml#/components/securitySchemes/bearerAuth"
 
   parameters:
-    EventId:
-      name: id
+    SessionId:
+      name: sessionId
       in: path
       required: true
-      schema: { type: integer, format: int64, example: 4711 }
+      schema: { type: integer, format: int64, example: 9001 }
     HoldId:
       name: holdId
       in: path
@@ -146,16 +185,22 @@ components:
   schemas:
     Seat:
       type: object
-      required: [label, status]
+      required: [label, sector, row, number, tierCode, priceCents, currency, status]
       properties:
-        label: { type: string, example: "E14" }
+        label: { $ref: "./common.yaml#/components/schemas/SeatLabel" }
+        sector: { type: string, example: "PLATEA" }
+        row: { type: string, example: "E" }
+        number: { type: integer, minimum: 1, example: 14 }
+        tierCode: { type: string, example: "GOLD" }
+        priceCents: { type: integer, format: int64, example: 8000 }
+        currency: { $ref: "./common.yaml#/components/schemas/Currency" }
         status: { type: string, enum: [FREE, HELD, SOLD], example: "FREE" }
 
     SeatMap:
       type: object
-      required: [eventId, seats]
+      required: [sessionId, seats]
       properties:
-        eventId: { type: integer, format: int64, example: 4711 }
+        sessionId: { type: integer, format: int64, example: 9001 }
         seats:
           type: array
           items: { $ref: "#/components/schemas/Seat" }
@@ -165,19 +210,22 @@ components:
       additionalProperties: false
       required: [seat]
       properties:
-        seat: { type: string, example: "E14" }
+        seat: { $ref: "./common.yaml#/components/schemas/SeatLabel" }
 
     Hold:
       type: object
-      required: [holdId, eventId, seat, expiresAt]
+      required: [holdId, sessionId, seat, priceCents, currency, expiresAt]
       properties:
         holdId: { type: integer, format: int64, example: 98213 }
-        eventId: { type: integer, format: int64, example: 4711 }
-        seat: { type: string, example: "E14" }
-        expiresAt: { type: string, format: date-time, example: "2026-06-01T10:10:00Z" }
+        sessionId: { type: integer, format: int64, example: 9001 }
+        seat: { $ref: "./common.yaml#/components/schemas/SeatLabel" }
+        priceCents: { type: integer, format: int64, example: 8000 }
+        currency: { $ref: "./common.yaml#/components/schemas/Currency" }
+        expiresAt: { type: string, format: date-time, example: "2026-11-10T10:10:00Z" }
 
     CreateOrderRequest:
       type: object
+      additionalProperties: false
       required: [holdId, paymentMethodToken]
       properties:
         holdId: { type: integer, format: int64, example: 98213 }
@@ -185,10 +233,25 @@ components:
 
     Order:
       type: object
-      required: [orderId, eventId, seat, status, createdAt]
+      required: [orderId, sessionId, seat, amountCents, currency, status, createdAt]
       properties:
         orderId: { type: string, format: uuid, example: "a1b2c3d4-e5f6-7a8b-9c0d-1e2f3a4b5c6d" }
-        eventId: { type: integer, format: int64, example: 4711 }
-        seat: { type: string, example: "E14" }
+        sessionId: { type: integer, format: int64, example: 9001 }
+        seat: { $ref: "./common.yaml#/components/schemas/SeatLabel" }
+        amountCents: { type: integer, format: int64, example: 8000 }
+        currency: { $ref: "./common.yaml#/components/schemas/Currency" }
         status: { type: string, enum: [PENDING, PAID, CANCELLED, REJECTED], example: "PAID" }
         createdAt: { type: string, format: date-time }
+
+    OrderPage:
+      type: object
+      required: [items, limit]
+      properties:
+        items:
+          type: array
+          items: { $ref: "#/components/schemas/Order" }
+        nextCursor:
+          type: [string, "null"]
+        limit:
+          type: integer
+          example: 50

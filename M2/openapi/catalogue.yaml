@@ -1,34 +1,64 @@
 openapi: 3.1.0
 info:
   title: Catalogue Service API (Group 6)
-  version: 1.0.0
+  version: 1.1.0
   description: >
-    Catalogue Service (Kotlin / Spring Boot). Owns venues, seat plans, events, sessions,
-    price tiers and the event-driven `session_sales` read model for the organiser dashboard.
-    Live seat status (FREE / HELD / SOLD) is owned by Inventory & Orders, not by this service.
+    Catalogue Service (Kotlin / Spring Boot). Owns venues and their fixed seat layout (sectors),
+    events, sessions, price tiers and the event-driven `session_sales` read model for the organiser dashboard.
+
+
+    An event has one or more sessions (dates). Price tiers are bound to venue sectors and apply to every
+    session of the event. When an event is created, one `SessionPublished` message per session is sent to the
+    broker; Inventory & Orders uses it to generate the seats. Individual seats and their live status
+    (FREE / HELD / SOLD) are owned by Inventory & Orders, not by this service.
 servers:
   - url: http://localhost:8081/api/v1
     description: Catalogue Service (reached by clients through the API Gateway)
 
 paths:
+  /venues:
+    get:
+      operationId: listVenues
+      summary: List of the available venues
+      security: []
+      responses:
+        "200":
+          description: All venues
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: "#/components/schemas/VenueSummary" }
+
+  /venues/{venueId}:
+    parameters:
+      - $ref: "#/components/parameters/VenueId"
+    get:
+      operationId: getVenue
+      summary: Venue detail with its fixed sector layout
+      description: The organiser uses the sector codes to bind price tiers when creating an event.
+      security: []
+      responses:
+        "200":
+          description: The venue and its sectors
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/VenueDetail" }
+        "400": { $ref: "./common.yaml#/components/responses/MalformedRequest" }
+        "404": { $ref: "./common.yaml#/components/responses/NotFound" }
+
   /events:
     get:
       operationId: listEvents
       summary: Paginated list of events in the catalogue
       security: []
       parameters:
-        - name: limit
-          in: query
-          description: Number of events per page (default 50, max 100)
-          schema: { type: integer, minimum: 1, maximum: 100 }
-        - name: cursor
-          in: query
-          description: Opaque cursor for pagination
-          schema: { type: string }
+        - $ref: "./common.yaml#/components/parameters/Limit"
+        - $ref: "./common.yaml#/components/parameters/Cursor"
         - name: city
           in: query
-          description: Filter by city
-          schema: { type: string }
+          description: Filter by the city of the venue
+          schema: { type: string, example: "TORINO" }
       responses:
         "200":
           description: A page of events
@@ -40,8 +70,15 @@ paths:
 
     post:
       operationId: createEvent
-      summary: Publication of a new event by the organiser
-      description: Persists the event and emits `SessionPublished` through the outbox.
+      summary: Publication of a new event with its sessions and price tiers (organiser only)
+      description: >
+        Stores the event, its sessions and price tiers, then publishes one `SessionPublished` message per session.
+        The organiser is taken from the JWT (`sub`), the city from the venue, the session status is set by the server.
+
+
+        Validation rules (422 otherwise): `venueId` must exist; every sector of the venue appears in exactly one
+        price tier (no missing, unknown or repeated sector); tier codes are unique; at least one session;
+        no duplicated `startsAt`; all dates in the future; `salesOpenAt` before `startsAt`.
       security:
         - bearerAuth: []
       requestBody:
@@ -49,30 +86,41 @@ paths:
         content:
           application/json:
             schema: { $ref: "#/components/schemas/CreateEventRequest" }
+            example:
+              title: "Rock Concert 2026"
+              venueId: 12
+              priceTiers:
+                - { code: "GOLD", priceCents: 8000, currency: "EUR", sectors: ["PLATEA"] }
+                - { code: "SILVER", priceCents: 5000, currency: "EUR", sectors: ["TRIBUNA_EST", "TRIBUNA_OVEST"] }
+                - { code: "BRONZE", priceCents: 3000, currency: "EUR", sectors: ["GALLERIA"] }
+              sessions:
+                - { startsAt: "2026-12-04T21:00:00Z", salesOpenAt: "2026-11-10T10:00:00Z" }
+                - { startsAt: "2026-12-05T21:00:00Z", salesOpenAt: "2026-11-10T10:00:00Z" }
+                - { startsAt: "2026-12-06T18:00:00Z", salesOpenAt: "2026-11-10T10:00:00Z" }
       responses:
         "201":
-          description: Event successfully created
+          description: Event and sessions successfully created
           headers:
             Location:
               description: URL of the created event
-              schema: { type: string }
+              schema: { type: string, example: "/api/v1/events/4711" }
           content:
             application/json:
-              schema: { $ref: "#/components/schemas/Event" }
+              schema: { $ref: "#/components/schemas/EventDetail" }
         "400": { $ref: "./common.yaml#/components/responses/MalformedRequest" }
         "401": { $ref: "./common.yaml#/components/responses/Unauthorized" }
         "403": { $ref: "./common.yaml#/components/responses/Forbidden" }
         "422": { $ref: "./common.yaml#/components/responses/ValidationFailed" }
 
-  /events/{id}:
+  /events/{eventId}:
     parameters:
       - $ref: "#/components/parameters/EventId"
     get:
       operationId: getEventDetail
-      summary: Detail of an event and its static seat plan
+      summary: Detail of an event with its venue, price tiers and sessions
       description: >
-        Returns the event and the seat labels of its plan. The live status of each seat
-        is served by Inventory & Orders (`GET /events/{id}/seats`).
+        Does not contain seats. The live seat map of a session is served by Inventory & Orders
+        (`GET /sessions/{sessionId}/seats`).
       security: []
       responses:
         "200":
@@ -83,20 +131,22 @@ paths:
         "400": { $ref: "./common.yaml#/components/responses/MalformedRequest" }
         "404": { $ref: "./common.yaml#/components/responses/NotFound" }
 
-  /events/{id}/sales:
+  /sessions/{sessionId}/sales:
     parameters:
-      - $ref: "#/components/parameters/EventId"
+      - $ref: "#/components/parameters/SessionId"
     get:
-      operationId: getEventSalesDashboard
-      summary: Sales dashboard for the organiser (event-driven read model, built from `OrderPaid`)
+      operationId: getSessionSales
+      summary: Sales dashboard of a session (event-driven read model, built only from `OrderPaid`)
+      description: Only the organiser who owns the event can read it (403 otherwise). Eventually consistent.
       security:
         - bearerAuth: []
       responses:
         "200":
-          description: Event sales statistics
+          description: Session sales statistics, also split by price tier
           content:
             application/json:
               schema: { $ref: "#/components/schemas/SessionSales" }
+        "400": { $ref: "./common.yaml#/components/responses/MalformedRequest" }
         "401": { $ref: "./common.yaml#/components/responses/Unauthorized" }
         "403": { $ref: "./common.yaml#/components/responses/Forbidden" }
         "404": { $ref: "./common.yaml#/components/responses/NotFound" }
@@ -107,33 +157,106 @@ components:
       $ref: "./common.yaml#/components/securitySchemes/bearerAuth"
 
   parameters:
+    VenueId:
+      name: venueId
+      in: path
+      required: true
+      schema: { type: integer, format: int64, example: 12 }
     EventId:
-      name: id
+      name: eventId
       in: path
       required: true
       schema: { type: integer, format: int64, example: 4711 }
+    SessionId:
+      name: sessionId
+      in: path
+      required: true
+      schema: { type: integer, format: int64, example: 9001 }
 
   schemas:
-    Event:
+    VenueSummary:
       type: object
-      required: [id, title, venue, city, startsAt]
+      required: [id, name, city]
       properties:
-        id: { type: integer, format: int64, example: 4711 }
-        title: { type: string, example: "Rock Concert 2026" }
-        venue: { type: string, example: "Stadio Olimpico" }
-        city: { type: string, example: "Torino" }
-        startsAt: { type: string, format: date-time, example: "2026-07-15T21:00:00Z" }
+        id: { type: integer, format: int64, example: 12 }
+        name: { type: string, example: "PALAOLIMPICO" }
+        city: { type: string, example: "TORINO" }
+
+    Sector:
+      type: object
+      description: Fixed part of the venue layout. Seats are generated as rows A, B, C… × numbers 1..seatsPerRow.
+      required: [code, rows, seatsPerRow]
+      properties:
+        code: { type: string, pattern: "^[A-Z0-9_]{1,30}$", example: "PLATEA" }
+        rows: { type: integer, minimum: 1, example: 10 }
+        seatsPerRow: { type: integer, minimum: 1, example: 20 }
+
+    VenueDetail:
+      allOf:
+        - $ref: "#/components/schemas/VenueSummary"
+        - type: object
+          required: [sectors]
+          properties:
+            sectors:
+              type: array
+              items: { $ref: "#/components/schemas/Sector" }
+
+    PriceTier:
+      type: object
+      additionalProperties: false
+      required: [code, priceCents, currency, sectors]
+      properties:
+        code: { type: string, pattern: "^[A-Z0-9_]{1,20}$", example: "GOLD" }
+        priceCents: { type: integer, format: int64, minimum: 1, example: 8000 }
+        currency: { $ref: "./common.yaml#/components/schemas/Currency" }
+        sectors:
+          type: array
+          minItems: 1
+          uniqueItems: true
+          items: { type: string, example: "PLATEA" }
+
+    CreateSessionRequest:
+      type: object
+      additionalProperties: false
+      required: [startsAt, salesOpenAt]
+      properties:
+        startsAt: { type: string, format: date-time, example: "2026-12-04T21:00:00Z" }
+        salesOpenAt: { type: string, format: date-time, example: "2026-11-10T10:00:00Z" }
+
+    Session:
+      type: object
+      required: [id, startsAt, salesOpenAt, status]
+      properties:
+        id: { type: integer, format: int64, example: 9001 }
+        startsAt: { type: string, format: date-time, example: "2026-12-04T21:00:00Z" }
+        salesOpenAt: { type: string, format: date-time, example: "2026-11-10T10:00:00Z" }
+        status: { type: string, enum: [SCHEDULED, CANCELLED], example: "SCHEDULED" }
 
     CreateEventRequest:
       type: object
-      required: [title, venue, city, startsAt, totalSeats, price]
+      additionalProperties: false
+      required: [title, venueId, priceTiers, sessions]
       properties:
-        title: { type: string }
-        venue: { type: string }
-        city: { type: string }
-        startsAt: { type: string, format: date-time }
-        totalSeats: { type: integer, minimum: 1 }
-        price: { type: number, format: double }
+        title: { type: string, minLength: 1, maxLength: 200, example: "Rock Concert 2026" }
+        venueId: { type: integer, format: int64, example: 12 }
+        priceTiers:
+          type: array
+          minItems: 1
+          items: { $ref: "#/components/schemas/PriceTier" }
+        sessions:
+          type: array
+          minItems: 1
+          items: { $ref: "#/components/schemas/CreateSessionRequest" }
+
+    EventSummary:
+      type: object
+      required: [id, title, venue, firstStartsAt, lastStartsAt]
+      properties:
+        id: { type: integer, format: int64, example: 4711 }
+        title: { type: string, example: "Rock Concert 2026" }
+        venue: { $ref: "#/components/schemas/VenueSummary" }
+        firstStartsAt: { type: string, format: date-time, example: "2026-12-04T21:00:00Z" }
+        lastStartsAt: { type: string, format: date-time, example: "2026-12-06T18:00:00Z" }
 
     EventPage:
       type: object
@@ -141,35 +264,50 @@ components:
       properties:
         items:
           type: array
-          items: { $ref: "#/components/schemas/Event" }
+          items: { $ref: "#/components/schemas/EventSummary" }
         nextCursor:
           type: [string, "null"]
           example: "4712"
         limit:
           type: integer
-          example: 5
-
-    SeatPlanEntry:
-      type: object
-      required: [label]
-      properties:
-        label: { type: string, example: "E14" }
+          example: 50
 
     EventDetail:
-      allOf:
-        - $ref: "#/components/schemas/Event"
-        - type: object
-          required: [seats]
-          properties:
-            seats:
-              type: array
-              items: { $ref: "#/components/schemas/SeatPlanEntry" }
+      type: object
+      required: [id, title, venue, priceTiers, sessions]
+      properties:
+        id: { type: integer, format: int64, example: 4711 }
+        title: { type: string, example: "Rock Concert 2026" }
+        venue: { $ref: "#/components/schemas/VenueSummary" }
+        priceTiers:
+          type: array
+          items: { $ref: "#/components/schemas/PriceTier" }
+        sessions:
+          type: array
+          items: { $ref: "#/components/schemas/Session" }
+
+    TierSales:
+      type: object
+      required: [tierCode, seatsSold, revenueCents]
+      properties:
+        tierCode: { type: string, example: "GOLD" }
+        seatsSold: { type: integer, example: 180 }
+        revenueCents: { type: integer, format: int64, example: 1440000 }
 
     SessionSales:
       type: object
-      required: [eventId, totalSeats, seatsSold, totalRevenue]
+      required: [sessionId, eventId, totalSeats, seatsSold, revenueCents, currency, byTier, updatedAt]
       properties:
+        sessionId: { type: integer, format: int64, example: 9001 }
         eventId: { type: integer, format: int64, example: 4711 }
-        totalSeats: { type: integer, example: 50000 }
-        seatsSold: { type: integer, example: 34200 }
-        totalRevenue: { type: number, format: double, example: 1710000.00 }
+        totalSeats: { type: integer, example: 950 }
+        seatsSold: { type: integer, example: 420 }
+        revenueCents: { type: integer, format: int64, example: 2460000 }
+        currency: { $ref: "./common.yaml#/components/schemas/Currency" }
+        byTier:
+          type: array
+          items: { $ref: "#/components/schemas/TierSales" }
+        updatedAt:
+          type: string
+          format: date-time
+          description: Time of the last `OrderPaid` applied to the read model

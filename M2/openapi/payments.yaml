@@ -1,7 +1,7 @@
 openapi: 3.1.0
 info:
   title: Payments Service API (Group 6)
-  version: 1.0.0
+  version: 1.1.0
   description: >
     Payments Service (Kotlin / Spring Boot). Interfaces with the external payment provider (sandbox).
     None of these endpoints are routed through the API Gateway:
@@ -23,8 +23,8 @@ paths:
       operationId: processPaymentSync
       summary: Internal synchronous call from Inventory & Orders to start payment on the sandbox provider
       description: >
-        Idempotent on `orderId`: repeating the call for the same order returns the existing payment.
-        The caller applies a 2s timeout.
+        Idempotent on `orderId`: repeating the call for the same order returns the existing payment and never
+        charges twice. The caller applies a 2s timeout.
       security: []
       requestBody:
         required: true
@@ -72,11 +72,12 @@ components:
   schemas:
     PaymentRequest:
       type: object
-      required: [orderId, amount, currency, paymentMethodToken]
+      additionalProperties: false
+      required: [orderId, amountCents, currency, paymentMethodToken]
       properties:
         orderId: { type: string, format: uuid }
-        amount: { type: number, format: double, example: 50.00 }
-        currency: { type: string, example: "EUR" }
+        amountCents: { type: integer, format: int64, minimum: 1, example: 8000 }
+        currency: { $ref: "./common.yaml#/components/schemas/Currency" }
         paymentMethodToken: { type: string, example: "tok_sandbox_12345" }
 
     PaymentResponse:
