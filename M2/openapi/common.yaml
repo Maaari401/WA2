@@ -1,0 +1,75 @@
+openapi: 3.1.0
+info:
+  title: WA2 Ticketing Platform - Shared Components (Group 6)
+  version: 1.0.0
+  description: >
+    Components shared by every service specification.
+    All error documents follow the RFC 9457 (application/problem+json) standard.
+
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: OIDC access token issued by Keycloak and verified by the API Gateway.
+
+  schemas:
+    Problem:
+      type: object
+      description: RFC 9457 Problem Document
+      required: [title, status, detail]
+      properties:
+        type:
+          type: string
+          format: uri
+          example: "https://tickets.example.com/problems/conflict"
+        title:
+          type: string
+          example: "Resource Conflict"
+        status:
+          type: integer
+          example: 409
+        detail:
+          type: string
+          example: "The seat E14 is already held or sold."
+        instance:
+          type: string
+          example: "/api/v1/events/4711/holds"
+
+  responses:
+    MalformedRequest:
+      description: The request cannot be read syntactically (body, query, or path)
+      content:
+        application/problem+json:
+          schema: { $ref: "#/components/schemas/Problem" }
+    Unauthorized:
+      description: Missing or invalid authentication
+      content:
+        application/problem+json:
+          schema: { $ref: "#/components/schemas/Problem" }
+    Forbidden:
+      description: Action not authorized for the current user
+      content:
+        application/problem+json:
+          schema: { $ref: "#/components/schemas/Problem" }
+    NotFound:
+      description: The URL names no resource
+      content:
+        application/problem+json:
+          schema: { $ref: "#/components/schemas/Problem" }
+    Conflict:
+      description: State conflict on the resource (e.g., seat already held or hold expired)
+      content:
+        application/problem+json:
+          schema: { $ref: "#/components/schemas/Problem" }
+    ValidationFailed:
+      description: Input parameter validation failed
+      content:
+        application/problem+json:
+          schema: { $ref: "#/components/schemas/Problem" }
+    GatewayTimeout:
+      description: Timeout expired during synchronous inter-service call (e.g., > 2s for Payments)
+      content:
+        application/problem+json:
+          schema: { $ref: "#/components/schemas/Problem" }

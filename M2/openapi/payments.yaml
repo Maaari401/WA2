@@ -1,0 +1,96 @@
+openapi: 3.1.0
+info:
+  title: Payments Service API (Group 6)
+  version: 1.0.0
+  description: >
+    Payments Service (Kotlin / Spring Boot). Interfaces with the external payment provider (sandbox).
+    None of these endpoints are routed through the API Gateway:
+    `POST /payments` is an internal call from Inventory & Orders, and the webhook is called by the provider.
+servers:
+  - url: http://localhost:8083/api/v1
+    description: Payments Service (internal network + provider webhook ingress)
+
+tags:
+  - name: internal
+    description: Service-to-service calls, not exposed to clients
+  - name: provider
+    description: Callbacks invoked by the external payment provider
+
+paths:
+  /payments:
+    post:
+      tags: [internal]
+      operationId: processPaymentSync
+      summary: Internal synchronous call from Inventory & Orders to start payment on the sandbox provider
+      description: >
+        Idempotent on `orderId`: repeating the call for the same order returns the existing payment.
+        The caller applies a 2s timeout.
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/PaymentRequest" }
+      responses:
+        "200":
+          description: Synchronous response from the payment gateway (authorization or immediate outcome)
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/PaymentResponse" }
+        "400": { $ref: "./common.yaml#/components/responses/MalformedRequest" }
+        "409": { $ref: "./common.yaml#/components/responses/Conflict" }
+        "422": { $ref: "./common.yaml#/components/responses/ValidationFailed" }
+
+  /payments/webhooks/provider:
+    post:
+      tags: [provider]
+      operationId: handlePaymentWebhook
+      summary: Asynchronous callback endpoint for payment provider webhooks (sandbox)
+      description: >
+        Webhooks may arrive late, duplicated or out of order. Each one is stored in `webhook_inbox`
+        and deduplicated by `eventId` before emitting `PaymentCaptured` / `PaymentFailed`.
+      security: []
+      parameters:
+        - name: X-Provider-Signature
+          in: header
+          required: true
+          description: HMAC signature of the raw body, computed by the provider with the shared webhook secret
+          schema: { type: string }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/WebhookPayload" }
+      responses:
+        "200":
+          description: Webhook processed or successfully deduplicated
+        "400": { $ref: "./common.yaml#/components/responses/MalformedRequest" }
+        "401": { $ref: "./common.yaml#/components/responses/Unauthorized" }
+        "422": { $ref: "./common.yaml#/components/responses/ValidationFailed" }
+
+components:
+  schemas:
+    PaymentRequest:
+      type: object
+      required: [orderId, amount, currency, paymentMethodToken]
+      properties:
+        orderId: { type: string, format: uuid }
+        amount: { type: number, format: double, example: 50.00 }
+        currency: { type: string, example: "EUR" }
+        paymentMethodToken: { type: string, example: "tok_sandbox_12345" }
+
+    PaymentResponse:
+      type: object
+      required: [paymentId, status]
+      properties:
+        paymentId: { type: string, format: uuid }
+        status: { type: string, enum: [PENDING, CAPTURED, DECLINED], example: "PENDING" }
+
+    WebhookPayload:
+      type: object
+      required: [eventId, providerTransactionId, orderId, status]
+      properties:
+        eventId: { type: string, example: "evt_pay_9988" }
+        providerTransactionId: { type: string, example: "tx_sandbox_99" }
+        orderId: { type: string, format: uuid }
+        status: { type: string, enum: [SUCCESS, FAILED] }

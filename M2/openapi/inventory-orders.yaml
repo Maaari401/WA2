@@ -1,0 +1,194 @@
+openapi: 3.1.0
+info:
+  title: Inventory & Orders Service API (Group 6)
+  version: 1.0.0
+  description: >
+    Inventory & Orders Service (Rust / Axum + SQLx). Owns seat state (FREE -> HELD -> SOLD),
+    10-minute holds and the order lifecycle. Calls Payments synchronously (`POST /payments`, 2s timeout).
+servers:
+  - url: http://localhost:8082/api/v1
+    description: Inventory & Orders Service (reached by clients through the API Gateway)
+
+security:
+  - bearerAuth: []
+
+paths:
+  /events/{id}/seats:
+    parameters:
+      - $ref: "#/components/parameters/EventId"
+    get:
+      operationId: getSeatMap
+      summary: Live seat map of an event (status of every seat)
+      security: []
+      parameters:
+        - name: If-None-Match
+          in: header
+          description: ETag of a previous answer for caching
+          schema: { type: string }
+      responses:
+        "200":
+          description: The current status of every seat
+          headers:
+            ETag:
+              description: The version of the seat map
+              schema: { type: string }
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/SeatMap" }
+        "304":
+          description: The seat map has not changed since the provided ETag
+        "400": { $ref: "./common.yaml#/components/responses/MalformedRequest" }
+        "404": { $ref: "./common.yaml#/components/responses/NotFound" }
+
+  /events/{id}/holds:
+    parameters:
+      - $ref: "#/components/parameters/EventId"
+    post:
+      operationId: createHold
+      summary: Temporarily reserves a free seat (FREE -> HELD, 10 min TTL)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/HoldRequest" }
+      responses:
+        "201":
+          description: Hold successfully placed
+          headers:
+            Location:
+              description: URL of the created hold resource
+              schema: { type: string }
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Hold" }
+        "400": { $ref: "./common.yaml#/components/responses/MalformedRequest" }
+        "401": { $ref: "./common.yaml#/components/responses/Unauthorized" }
+        "404": { $ref: "./common.yaml#/components/responses/NotFound" }
+        "409": { $ref: "./common.yaml#/components/responses/Conflict" }
+        "422": { $ref: "./common.yaml#/components/responses/ValidationFailed" }
+
+  /holds/{holdId}:
+    parameters:
+      - $ref: "#/components/parameters/HoldId"
+    delete:
+      operationId: releaseHold
+      summary: Releases a hold early (HELD -> FREE)
+      responses:
+        "204":
+          description: Hold successfully released (idempotent operation)
+        "400": { $ref: "./common.yaml#/components/responses/MalformedRequest" }
+        "401": { $ref: "./common.yaml#/components/responses/Unauthorized" }
+        "404": { $ref: "./common.yaml#/components/responses/NotFound" }
+
+  /orders:
+    post:
+      operationId: createOrder
+      summary: Converts an active hold into an order and starts synchronous payment to Payments (2s timeout)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/CreateOrderRequest" }
+      responses:
+        "201":
+          description: Order registered and payment process started
+          headers:
+            Location:
+              description: URL of the created order
+              schema: { type: string }
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Order" }
+        "400": { $ref: "./common.yaml#/components/responses/MalformedRequest" }
+        "401": { $ref: "./common.yaml#/components/responses/Unauthorized" }
+        "409": { $ref: "./common.yaml#/components/responses/Conflict" }
+        "422": { $ref: "./common.yaml#/components/responses/ValidationFailed" }
+        "504": { $ref: "./common.yaml#/components/responses/GatewayTimeout" }
+
+  /orders/{orderId}:
+    parameters:
+      - $ref: "#/components/parameters/OrderId"
+    get:
+      operationId: getOrder
+      summary: Retrieves the current status of the order
+      responses:
+        "200":
+          description: Order detail
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Order" }
+        "400": { $ref: "./common.yaml#/components/responses/MalformedRequest" }
+        "401": { $ref: "./common.yaml#/components/responses/Unauthorized" }
+        "404": { $ref: "./common.yaml#/components/responses/NotFound" }
+
+components:
+  securitySchemes:
+    bearerAuth:
+      $ref: "./common.yaml#/components/securitySchemes/bearerAuth"
+
+  parameters:
+    EventId:
+      name: id
+      in: path
+      required: true
+      schema: { type: integer, format: int64, example: 4711 }
+    HoldId:
+      name: holdId
+      in: path
+      required: true
+      schema: { type: integer, format: int64, example: 98213 }
+    OrderId:
+      name: orderId
+      in: path
+      required: true
+      schema: { type: string, format: uuid, example: "a1b2c3d4-e5f6-7a8b-9c0d-1e2f3a4b5c6d" }
+
+  schemas:
+    Seat:
+      type: object
+      required: [label, status]
+      properties:
+        label: { type: string, example: "E14" }
+        status: { type: string, enum: [FREE, HELD, SOLD], example: "FREE" }
+
+    SeatMap:
+      type: object
+      required: [eventId, seats]
+      properties:
+        eventId: { type: integer, format: int64, example: 4711 }
+        seats:
+          type: array
+          items: { $ref: "#/components/schemas/Seat" }
+
+    HoldRequest:
+      type: object
+      additionalProperties: false
+      required: [seat]
+      properties:
+        seat: { type: string, example: "E14" }
+
+    Hold:
+      type: object
+      required: [holdId, eventId, seat, expiresAt]
+      properties:
+        holdId: { type: integer, format: int64, example: 98213 }
+        eventId: { type: integer, format: int64, example: 4711 }
+        seat: { type: string, example: "E14" }
+        expiresAt: { type: string, format: date-time, example: "2026-06-01T10:10:00Z" }
+
+    CreateOrderRequest:
+      type: object
+      required: [holdId, paymentMethodToken]
+      properties:
+        holdId: { type: integer, format: int64, example: 98213 }
+        paymentMethodToken: { type: string, example: "tok_sandbox_12345" }
+
+    Order:
+      type: object
+      required: [orderId, eventId, seat, status, createdAt]
+      properties:
+        orderId: { type: string, format: uuid, example: "a1b2c3d4-e5f6-7a8b-9c0d-1e2f3a4b5c6d" }
+        eventId: { type: integer, format: int64, example: 4711 }
+        seat: { type: string, example: "E14" }
+        status: { type: string, enum: [PENDING, PAID, CANCELLED, REJECTED], example: "PAID" }
+        createdAt: { type: string, format: date-time }

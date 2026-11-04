@@ -1,0 +1,92 @@
+openapi: 3.1.0
+info:
+  title: Ticketing Service API (Group 6)
+  version: 1.0.0
+  description: >
+    Ticketing Service (Rust / Axum + SQLx). Issues one ticket per paid seat (on `OrderPaid`)
+    and validates tickets at the gates. Re-scanning a ticket never admits twice.
+servers:
+  - url: http://localhost:8084/api/v1
+    description: Ticketing Service (reached by clients through the API Gateway)
+
+security:
+  - bearerAuth: []
+
+paths:
+  /tickets/{ticketId}:
+    parameters:
+      - $ref: "#/components/parameters/TicketId"
+    get:
+      operationId: getTicket
+      summary: Retrieves ticket data and validation signature (QR code)
+      responses:
+        "200":
+          description: Issued ticket detail
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Ticket" }
+        "400": { $ref: "./common.yaml#/components/responses/MalformedRequest" }
+        "401": { $ref: "./common.yaml#/components/responses/Unauthorized" }
+        "404": { $ref: "./common.yaml#/components/responses/NotFound" }
+
+  /tickets/{ticketId}/scan:
+    parameters:
+      - $ref: "#/components/parameters/TicketId"
+    post:
+      operationId: scanTicket
+      summary: Scanning and verification of the ticket at the entrance gates (strictly idempotent)
+      description: Requires the gate-staff role.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/ScanRequest" }
+      responses:
+        "200":
+          description: Gate validation result
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ScanResponse" }
+        "400": { $ref: "./common.yaml#/components/responses/MalformedRequest" }
+        "401": { $ref: "./common.yaml#/components/responses/Unauthorized" }
+        "403": { $ref: "./common.yaml#/components/responses/Forbidden" }
+        "404": { $ref: "./common.yaml#/components/responses/NotFound" }
+        "409": { $ref: "./common.yaml#/components/responses/Conflict" }
+
+components:
+  securitySchemes:
+    bearerAuth:
+      $ref: "./common.yaml#/components/securitySchemes/bearerAuth"
+
+  parameters:
+    TicketId:
+      name: ticketId
+      in: path
+      required: true
+      schema: { type: string, format: uuid, example: "f47ac10b-58cc-4372-a567-0e02b2c3d4e5" }
+
+  schemas:
+    Ticket:
+      type: object
+      required: [ticketId, orderId, eventId, seat, qrCodePayload]
+      properties:
+        ticketId: { type: string, format: uuid }
+        orderId: { type: string, format: uuid }
+        eventId: { type: integer, format: int64 }
+        seat: { type: string, example: "E14" }
+        qrCodePayload: { type: string, example: "eyJ0aWNrZXRJZCI6ImY0N2FjMTBi..." }
+
+    ScanRequest:
+      type: object
+      required: [scannedByGateId, timestamp]
+      properties:
+        scannedByGateId: { type: string, example: "GATE_NORTH_02" }
+        timestamp: { type: string, format: date-time }
+
+    ScanResponse:
+      type: object
+      required: [ticketId, result, message]
+      properties:
+        ticketId: { type: string, format: uuid }
+        result: { type: string, enum: [VALID, ALREADY_USED, INVALID], example: "VALID" }
+        message: { type: string, example: "Access Granted" }

@@ -1,0 +1,175 @@
+openapi: 3.1.0
+info:
+  title: Catalogue Service API (Group 6)
+  version: 1.0.0
+  description: >
+    Catalogue Service (Kotlin / Spring Boot). Owns venues, seat plans, events, sessions,
+    price tiers and the event-driven `session_sales` read model for the organiser dashboard.
+    Live seat status (FREE / HELD / SOLD) is owned by Inventory & Orders, not by this service.
+servers:
+  - url: http://localhost:8081/api/v1
+    description: Catalogue Service (reached by clients through the API Gateway)
+
+paths:
+  /events:
+    get:
+      operationId: listEvents
+      summary: Paginated list of events in the catalogue
+      security: []
+      parameters:
+        - name: limit
+          in: query
+          description: Number of events per page (default 50, max 100)
+          schema: { type: integer, minimum: 1, maximum: 100 }
+        - name: cursor
+          in: query
+          description: Opaque cursor for pagination
+          schema: { type: string }
+        - name: city
+          in: query
+          description: Filter by city
+          schema: { type: string }
+      responses:
+        "200":
+          description: A page of events
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/EventPage" }
+        "400": { $ref: "./common.yaml#/components/responses/MalformedRequest" }
+        "422": { $ref: "./common.yaml#/components/responses/ValidationFailed" }
+
+    post:
+      operationId: createEvent
+      summary: Publication of a new event by the organiser
+      description: Persists the event and emits `SessionPublished` through the outbox.
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/CreateEventRequest" }
+      responses:
+        "201":
+          description: Event successfully created
+          headers:
+            Location:
+              description: URL of the created event
+              schema: { type: string }
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Event" }
+        "400": { $ref: "./common.yaml#/components/responses/MalformedRequest" }
+        "401": { $ref: "./common.yaml#/components/responses/Unauthorized" }
+        "403": { $ref: "./common.yaml#/components/responses/Forbidden" }
+        "422": { $ref: "./common.yaml#/components/responses/ValidationFailed" }
+
+  /events/{id}:
+    parameters:
+      - $ref: "#/components/parameters/EventId"
+    get:
+      operationId: getEventDetail
+      summary: Detail of an event and its static seat plan
+      description: >
+        Returns the event and the seat labels of its plan. The live status of each seat
+        is served by Inventory & Orders (`GET /events/{id}/seats`).
+      security: []
+      responses:
+        "200":
+          description: The event detail
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/EventDetail" }
+        "400": { $ref: "./common.yaml#/components/responses/MalformedRequest" }
+        "404": { $ref: "./common.yaml#/components/responses/NotFound" }
+
+  /events/{id}/sales:
+    parameters:
+      - $ref: "#/components/parameters/EventId"
+    get:
+      operationId: getEventSalesDashboard
+      summary: Sales dashboard for the organiser (event-driven read model, built from `OrderPaid`)
+      security:
+        - bearerAuth: []
+      responses:
+        "200":
+          description: Event sales statistics
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/SessionSales" }
+        "401": { $ref: "./common.yaml#/components/responses/Unauthorized" }
+        "403": { $ref: "./common.yaml#/components/responses/Forbidden" }
+        "404": { $ref: "./common.yaml#/components/responses/NotFound" }
+
+components:
+  securitySchemes:
+    bearerAuth:
+      $ref: "./common.yaml#/components/securitySchemes/bearerAuth"
+
+  parameters:
+    EventId:
+      name: id
+      in: path
+      required: true
+      schema: { type: integer, format: int64, example: 4711 }
+
+  schemas:
+    Event:
+      type: object
+      required: [id, title, venue, city, startsAt]
+      properties:
+        id: { type: integer, format: int64, example: 4711 }
+        title: { type: string, example: "Rock Concert 2026" }
+        venue: { type: string, example: "Stadio Olimpico" }
+        city: { type: string, example: "Torino" }
+        startsAt: { type: string, format: date-time, example: "2026-07-15T21:00:00Z" }
+
+    CreateEventRequest:
+      type: object
+      required: [title, venue, city, startsAt, totalSeats, price]
+      properties:
+        title: { type: string }
+        venue: { type: string }
+        city: { type: string }
+        startsAt: { type: string, format: date-time }
+        totalSeats: { type: integer, minimum: 1 }
+        price: { type: number, format: double }
+
+    EventPage:
+      type: object
+      required: [items, limit]
+      properties:
+        items:
+          type: array
+          items: { $ref: "#/components/schemas/Event" }
+        nextCursor:
+          type: [string, "null"]
+          example: "4712"
+        limit:
+          type: integer
+          example: 5
+
+    SeatPlanEntry:
+      type: object
+      required: [label]
+      properties:
+        label: { type: string, example: "E14" }
+
+    EventDetail:
+      allOf:
+        - $ref: "#/components/schemas/Event"
+        - type: object
+          required: [seats]
+          properties:
+            seats:
+              type: array
+              items: { $ref: "#/components/schemas/SeatPlanEntry" }
+
+    SessionSales:
+      type: object
+      required: [eventId, totalSeats, seatsSold, totalRevenue]
+      properties:
+        eventId: { type: integer, format: int64, example: 4711 }
+        totalSeats: { type: integer, example: 50000 }
+        seatsSold: { type: integer, example: 34200 }
+        totalRevenue: { type: number, format: double, example: 1710000.00 }
