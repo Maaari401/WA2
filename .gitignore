@@ -1,2 +1,5 @@
 .idea
 .code
+
+# Metadati di sicurezza Windows (Zone Information)
+*:Zone.Identifier
